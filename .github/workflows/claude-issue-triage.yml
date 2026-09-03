@@ -1,0 +1,114 @@
+name: Claude Issue Triage
+
+on:
+  issues:
+    types: [opened, edited]
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude issue triage
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh label list:*),Bash(gh label create:*),Read,Grep,Glob"'
+          prompt: |
+            You are triaging issue #${{ github.event.issue.number }} in the repository ${{ github.repository }}.
+            Project context lives in CLAUDE.md and README.md: this is a vanilla JS Tetris with three key files (`game.js`, `index.html`, `style.css`) and no build system.
+
+            Follow these steps in order:
+
+            1. Read the full issue:
+               `gh issue view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json title,body,labels,author`
+
+            2. Explore the relevant files in the repo (`game.js`, `index.html`, `style.css`, `README.md`, `CLAUDE.md`) to locate the affected area. Use Read/Grep — do not clone or modify anything.
+
+            3. Manage labels:
+               - List existing ones: `gh label list --repo ${{ github.repository }}`
+               - Choose the ones that apply. Suggested categories: `bug`, `enhancement`, `gameplay`, `rendering`, `scoring`, `controls`, `ui`, `documentation`, `performance`, `question`.
+               - If a clearly applicable label does not exist, create it:
+                 `gh label create "<name>" --repo ${{ github.repository }} --color "<hex without #>" --description "<short>"`
+               - Assign the labels:
+                 `gh issue edit ${{ github.event.issue.number }} --repo ${{ github.repository }} --add-label "label1,label2"`
+
+            4. Post EXACTLY ONE diagnostic comment with:
+               `gh issue comment ${{ github.event.issue.number }} --repo ${{ github.repository }} --body "<content>"`
+
+               The comment MUST follow this exact structure in English:
+
+               ```
+               ## Automated diagnosis (Claude)
+
+               **Summary:** <1-2 sentences describing the problem or request>
+
+               **Affected area:** <specific files and functions, use `file:line` when possible>
+
+               **Likely cause / context:** <why it happens or what is missing, referencing the code>
+
+               **Proposed solution (high level):** <steps an implementer should follow; do not write the code yet>
+
+               **Risks / couplings:** <explicitly mention if the fix touches the `COLS`/`ROWS`/`BLOCK` coupling documented in CLAUDE.md, or any other invariant>
+               ```
+
+            Reference examples (for tone, granularity and label choice — do NOT copy verbatim; adapt to the actual issue):
+
+            Example 1 — Bug report
+              Issue title: "Rotating an I-piece against the right wall makes it disappear"
+              Suggested labels: `bug`, `gameplay`
+              Comment body:
+              ```
+              ## Automated diagnosis (Claude)
+
+              **Summary:** The I-piece vanishes when rotated flush against the right wall instead of kicking off it.
+
+              **Affected area:** `game.js` — `tryRotate` (wall-kick offsets) and `collide` (bounds check).
+
+              **Likely cause / context:** `tryRotate` only attempts ±1 and ±2 column offsets. The horizontal I-piece needs an offset of up to 3 columns when pivoted near the right edge, so every candidate collides and the piece is dropped from the board instead of the rotation being rejected cleanly.
+
+              **Proposed solution (high level):**
+              1. Extend the kick-offset list in `tryRotate` (e.g. also try ±3) or introduce piece-specific kick tables for the I-piece.
+              2. Ensure that when every offset collides, the original (pre-rotation) piece is preserved rather than being overwritten.
+              3. Add a manual repro: spawn an I-piece, move it to the right wall, press rotate.
+
+              **Risks / couplings:** None with the `COLS`/`ROWS`/`BLOCK` invariant. Behavior change only in rotation logic; keep `collide` as the single source of truth for bounds.
+              ```
+
+            Example 2 — Enhancement request
+              Issue title: "Add a hold-piece slot (press C to stash the current piece)"
+              Suggested labels: `enhancement`, `gameplay`, `controls`, `ui`
+              Comment body:
+              ```
+              ## Automated diagnosis (Claude)
+
+              **Summary:** Add a "hold" slot bound to `C` that swaps the active piece with a stashed one, following standard Tetris guideline behavior (one swap per drop).
+
+              **Affected area:** `game.js` — piece spawn (`spawn`/next-queue handling), input handler (keydown switch), and render loop (new preview panel). `index.html` — add a `<canvas id="hold">` next to `#next`. `style.css` — layout for the new panel.
+
+              **Likely cause / context:** Feature does not exist. Current code only has a `#next` preview canvas and no stash state; input handler has no `C` binding.
+
+              **Proposed solution (high level):**
+              1. Add module-level `hold` state and a `holdUsed` flag reset on each lock.
+              2. Bind `KeyC` in the keydown handler: if `hold` is empty, stash current piece and spawn from the next queue; otherwise swap current with `hold`. Reject if `holdUsed`.
+              3. Add `<canvas id="hold">` in `index.html` mirroring `#next` dimensions.
+              4. Render the held piece in the game loop using the same helper as the next preview.
+              5. Update the README controls section.
+
+              **Risks / couplings:** New canvas size must follow the same `BLOCK`-based sizing as `#next` — see the `COLS`/`ROWS`/`BLOCK` coupling note in CLAUDE.md. No changes to the main board dimensions.
+              ```
+
+            Strict constraints:
+            - Do NOT modify any file in the repo.
+            - Do NOT open PRs or make commits.
+            - Do NOT respond to `@claude` mentions (a different workflow handles that).
+            - Post exactly ONE comment, even if you are re-invoked after an issue edit.
